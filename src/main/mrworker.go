@@ -10,11 +10,13 @@ package main
 // Please do not change this file.
 //
 
-import "6.824/mr"
-import "plugin"
+import (
+	"log"
+	"mit_ds_2021/mr"
+	"plugin"
+)
 import "os"
 import "fmt"
-import "log"
 
 func main() {
 	if len(os.Args) != 2 {
@@ -24,7 +26,14 @@ func main() {
 
 	mapf, reducef := loadPlugin(os.Args[1])
 
-	mr.Worker(mapf, reducef)
+	worker, err := mr.CreateWorker()
+	if err != nil {
+		panic(err)
+	}
+	var handleError error = nil
+	for handleError == nil {
+		handleError = worker.Worker(mapf, reducef)
+	}
 }
 
 //

@@ -1,10 +1,10 @@
 package shardctrler
 
 
-import "6.824/raft"
-import "6.824/labrpc"
+import "mit_ds_2021/raft"
+import "mit_ds_2021/labrpc"
 import "sync"
-import "6.824/labgob"
+import "mit_ds_2021/labgob"
 
 
 type ShardCtrler struct {

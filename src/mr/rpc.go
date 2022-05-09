@@ -22,8 +22,29 @@ type ExampleReply struct {
 	Y int
 }
 
-// Add your RPC definitions here.
+type RequestArgs struct {
+	Worker WorkerInfo
+}
 
+type MapDoneArgs struct {
+	Worker                WorkerInfo
+	TaskId                string
+	IntermediateFilePaths []string
+	TaskDone              bool
+}
+
+type ReduceDoneArgs struct {
+	Worker   WorkerInfo
+	TaskId   string
+	output   string
+	TaskDone bool
+}
+
+type Query struct {
+	//TODO
+}
+
+// Add your RPC definitions here.
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.

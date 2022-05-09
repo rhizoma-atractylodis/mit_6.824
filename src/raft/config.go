@@ -8,8 +8,8 @@ package raft
 // test with the original before submitting.
 //
 
-import "6.824/labgob"
-import "6.824/labrpc"
+import "mit_ds_2021/labgob"
+import "mit_ds_2021/labrpc"
 import "bytes"
 import "log"
 import "sync"
@@ -485,18 +485,18 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 	return cmd
 }
 
-// do a complete agreement.
-// it might choose the wrong leader initially,
-// and have to re-submit after giving up.
-// entirely gives up after about 10 seconds.
-// indirectly checks that the servers agree on the
-// same value, since nCommitted() checks this,
-// as do the threads that read from applyCh.
-// returns index.
-// if retry==true, may submit the command multiple
-// times, in case a leader fails just after Start().
-// if retry==false, calls Start() only once, in order
-// to simplify the early Lab 2B tests.
+//do a complete agreement.
+//it might choose the wrong leader initially,
+//and have to re-submit after giving up.
+//entirely gives up after about 10 seconds.
+//indirectly checks that the servers agree on the
+//same value, since nCommitted() checks this,
+//as do the threads that read from applyCh.
+//returns index.
+//if retry==true, may submit the command multiple
+//times, in case a leader fails just after Start().
+//if retry==false, calls Start() only once, in order
+//to simplify the early Lab 2B tests.
 func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	t0 := time.Now()
 	starts := 0

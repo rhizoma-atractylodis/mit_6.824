@@ -1,7 +1,7 @@
 package shardctrler
 
-import "6.824/labrpc"
-import "6.824/raft"
+import "mit_ds_2021/labrpc"
+import "mit_ds_2021/raft"
 import "testing"
 import "os"
 

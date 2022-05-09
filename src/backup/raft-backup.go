@@ -1,4 +1,4 @@
-package raft
+package backup
 
 //
 // this is an outline of the API that raft must expose to
@@ -21,6 +21,7 @@ import (
 	"log"
 	"math"
 	"math/rand"
+	"mit_ds_2021/raft"
 
 	//	"bytes"
 	"sync"
@@ -64,7 +65,7 @@ type ApplyMsg struct {
 type Raft struct {
 	mu        sync.RWMutex        // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted state
+	persister *raft.Persister     // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
@@ -123,6 +124,7 @@ type AppendEntriesReply struct {
 // AppendEntries todo 添加日志条目
 func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term < rf.CurrentTerm {
 		return
 	}
@@ -135,12 +137,13 @@ func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 	rf.LeaderId = args.LeaderId
 	//更新活跃时间
 	rf.LastActiveTime = time.Now()
+	log.Printf("leader alive...")
 	//保存leader发来的日志条目
-	rf.mu.Unlock()
 	lastIndex := rf.lastIndex()
+	rf.mu.Unlock()
 	for i, entry := range args.Entries {
 		rf.mu.Lock()
-		index := lastIndex + i
+		index := lastIndex + i + 1
 		if index <= entry.LogIndex {
 			rf.Logs = append(rf.Logs, entry)
 		} else {
@@ -149,7 +152,6 @@ func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 				rf.Logs = append(rf.Logs, entry)
 			}
 		}
-		log.Printf("follower %d recieve log %v, index is %d", rf.me, entry.Command, entry.LogIndex)
 		rf.mu.Unlock()
 	}
 	rf.mu.Lock()
@@ -160,7 +162,6 @@ func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 			rf.CommitIndex = lastIndex
 		}
 	}
-	rf.mu.Unlock()
 	args.PrevLogTerm = rf.lastTerm()
 	args.PrevLogIndex = rf.lastIndex()
 	reply.Success = true
@@ -289,9 +290,7 @@ func (rf *Raft) RequestVote(args *RequestVote, reply *RequestVoteReply) {
 	//投票，并设置只能投给一个人
 	if rf.VoteFor == -1 || rf.VoteFor == args.CandidateId {
 		//todo 检查最后一条日志的term和日志列表长度以后再决定是否投票
-		rf.mu.Unlock()
 		if rf.Logs[rf.lastIndex()].CreateTerm <= args.LastLogTerm {
-			rf.mu.Lock()
 			rf.VoteFor = args.CandidateId
 			reply.Term = rf.CurrentTerm
 			reply.VoteGranted = true
@@ -326,25 +325,23 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term := -1
 
 	//Your code here (2B).
-	lastIndex := rf.lastIndex()
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	//如果不是leader，返回false
 	if rf.RaftStatus != LEADER {
-		rf.mu.Unlock()
 		return -1, -1, false
 	}
 	//构建log，并加入到leader的log_list中
 	rf.Logs = append(rf.Logs, &Log{
-		LogIndex:    lastIndex + 1,
+		LogIndex:    rf.lastIndex() + 1,
 		CreateTerm:  rf.CurrentTerm,
 		Command:     command,
 		IsCommitted: false,
 		IsApplied:   false,
 	})
-	term = rf.CurrentTerm
-	rf.mu.Unlock()
+	log.Printf("log %b update", command)
 	index = rf.lastIndex()
-	log.Printf("leader insert %b to log, index is %d", command, index)
+	term = rf.CurrentTerm
 	return index, term, true
 }
 
@@ -380,14 +377,12 @@ func (rf *Raft) lastTerm() int {
 
 //todo 执行日志复制与心跳
 func (rf *Raft) doAppendEntries(peerId int) {
-	index := rf.lastIndex()
-	term := rf.lastTerm()
 	rf.mu.RLock()
 	request := AppendEntries{
 		Term:         rf.CurrentTerm,
 		LeaderId:     rf.me,
-		PrevLogIndex: index,
-		PrevLogTerm:  term,
+		PrevLogIndex: rf.lastIndex(),
+		PrevLogTerm:  rf.lastTerm(),
 		Entries:      rf.Logs,
 		LeaderCommit: rf.CommitIndex,
 	}
@@ -433,8 +428,6 @@ func (rf *Raft) appendLogSignal() {
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 		func() {
-			//index := rf.lastIndex()
-			//term := rf.lastTerm()
 			rf.mu.Lock()
 			//判断状态，leader才能发送
 			if rf.RaftStatus != LEADER {
@@ -449,21 +442,21 @@ func (rf *Raft) appendLogSignal() {
 			}
 			rf.LastBroadcastTime = now
 			me := rf.me
-			//request := AppendEntries{
-			//	Term:         rf.CurrentTerm,
-			//	LeaderId:     rf.me,
-			//	PrevLogIndex: index,
-			//	PrevLogTerm:  term,
-			//	Entries:      rf.Logs,
-			//	LeaderCommit: rf.CommitIndex,
-			//}
+			request := AppendEntries{
+				Term:         rf.CurrentTerm,
+				LeaderId:     rf.me,
+				PrevLogIndex: rf.lastIndex(),
+				PrevLogTerm:  rf.lastTerm(),
+				Entries:      rf.Logs,
+				LeaderCommit: rf.CommitIndex,
+			}
 			rf.mu.Unlock()
 			for i := 0; i < len(rf.peers); i++ {
 				if i == me {
 					continue
 				}
-				rf.doAppendEntries(i)
-				//rf.sendAppendEntries(i, &request, &AppendEntriesReply{})
+				//rf.doAppendEntries(i)
+				rf.sendAppendEntries(i, &request, &AppendEntriesReply{})
 			}
 		}()
 	}
@@ -579,7 +572,7 @@ func (rf *Raft) election() {
 }
 
 func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	persister *raft.Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
@@ -594,10 +587,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.LastApplied = -1
 	rf.HeartSignal = make(chan AppendEntries)
 	rf.LeaderId = -1
-	for i := 0; i < len(peers); i++ {
-		rf.NextIndex = append(rf.NextIndex, 0)
-		rf.MatchIndex = append(rf.MatchIndex, -1)
-	}
 	//rf.ElectionSignal = make(chan RequestVote)
 	//rf.ElectionFailSignal = make(chan int)
 	// initialize from state persisted before a crash

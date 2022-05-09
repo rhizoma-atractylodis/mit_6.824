@@ -1,6 +1,6 @@
 package kvraft
 
-import "6.824/labrpc"
+import "mit_ds_2021/labrpc"
 import "testing"
 import "os"
 

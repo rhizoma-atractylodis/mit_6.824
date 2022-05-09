@@ -21,7 +21,6 @@ import (
 	"log"
 	"math"
 	"math/rand"
-
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -77,8 +76,6 @@ type Raft struct {
 	CommitIndex int
 	LastApplied int
 	RaftStatus  int
-	LastIndex   int
-	LastTerm    int
 
 	//leader
 	NextIndex  []int
@@ -95,7 +92,7 @@ type Raft struct {
 type Log struct {
 	LogIndex    int
 	CreateTerm  int
-	Command     interface{}
+	Command     string
 	IsCommitted bool
 	IsApplied   bool
 }
@@ -120,12 +117,10 @@ type AppendEntriesReply struct {
 	Success  bool
 }
 
-// AppendEntries todo 添加日志条目
+// AppendEntries todo 添加日志条目，处理心跳
 func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	if args.Term < rf.CurrentTerm {
-		return
-	}
+	defer rf.mu.Unlock()
 	//发现更大term，更新信息转换follower
 	if rf.CurrentTerm < args.Term {
 		rf.RaftStatus = FOLLOWER
@@ -135,35 +130,6 @@ func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 	rf.LeaderId = args.LeaderId
 	//更新活跃时间
 	rf.LastActiveTime = time.Now()
-	//保存leader发来的日志条目
-	rf.mu.Unlock()
-	lastIndex := rf.lastIndex()
-	for i, entry := range args.Entries {
-		rf.mu.Lock()
-		index := lastIndex + i
-		if index <= entry.LogIndex {
-			rf.Logs = append(rf.Logs, entry)
-		} else {
-			if entry.CreateTerm != rf.Logs[index-1].CreateTerm {
-				rf.Logs = rf.Logs[:index-1]
-				rf.Logs = append(rf.Logs, entry)
-			}
-		}
-		log.Printf("follower %d recieve log %v, index is %d", rf.me, entry.Command, entry.LogIndex)
-		rf.mu.Unlock()
-	}
-	rf.mu.Lock()
-	//检查leader是否有更新的提交，如果有，那么在本地状态机应用并更新提交
-	if args.LeaderCommit > rf.CommitIndex {
-		rf.CommitIndex = args.LeaderCommit
-		if lastIndex < args.LeaderCommit {
-			rf.CommitIndex = lastIndex
-		}
-	}
-	rf.mu.Unlock()
-	args.PrevLogTerm = rf.lastTerm()
-	args.PrevLogIndex = rf.lastIndex()
-	reply.Success = true
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntries, reply *AppendEntriesReply) bool {
@@ -288,20 +254,42 @@ func (rf *Raft) RequestVote(args *RequestVote, reply *RequestVoteReply) {
 	}
 	//投票，并设置只能投给一个人
 	if rf.VoteFor == -1 || rf.VoteFor == args.CandidateId {
-		//todo 检查最后一条日志的term和日志列表长度以后再决定是否投票
-		rf.mu.Unlock()
-		if rf.Logs[rf.lastIndex()].CreateTerm <= args.LastLogTerm {
-			rf.mu.Lock()
-			rf.VoteFor = args.CandidateId
-			reply.Term = rf.CurrentTerm
-			reply.VoteGranted = true
-		}
+		rf.VoteFor = args.CandidateId
+		reply.Term = rf.CurrentTerm
+		reply.VoteGranted = true
 		rf.LastActiveTime = time.Now()
 		log.Printf("server %d vote to %d", rf.me, args.CandidateId)
 		return
 	}
 }
 
+// example code to send a RequestVote RPC to a server.
+// server is the index of the target server in rf.peers[].
+// expects RPC arguments in args.
+// fills in *reply with RPC reply, so caller should
+// pass &reply.
+// the types of the args and reply passed to Call() must be
+// the same as the types of the arguments declared in the
+// handler function (including whether they are pointers).
+//
+// The labrpc package simulates a lossy network, in which servers
+// may be unreachable, and in which requests and replies may be lost.
+// Call() sends a request and waits for a reply. If a reply arrives
+// within a timeout interval, Call() returns true; otherwise
+// Call() returns false. Thus Call() may not return for a while.
+// A false return can be caused by a dead server, a live server that
+// can't be reached, a lost request, or a lost reply.
+//
+// Call() is guaranteed to return (perhaps after a delay) *except* if the
+// handler function on the server side does not return.  Thus there
+// is no need to implement your own timeouts around Call().
+//
+// look at the comments in ../labrpc/labrpc.go for more details.
+//
+// if you're having trouble getting RPC to work, check that you've
+// capitalized all field names in structs passed over RPC, and
+// that the caller passes the address of the reply struct with &, not
+// the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVote, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
@@ -324,30 +312,24 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVote, reply *RequestVot
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
+	isLeader := true
 
-	//Your code here (2B).
-	lastIndex := rf.lastIndex()
-	rf.mu.Lock()
-	//如果不是leader，返回false
-	if rf.RaftStatus != LEADER {
-		rf.mu.Unlock()
-		return -1, -1, false
-	}
-	//构建log，并加入到leader的log_list中
-	rf.Logs = append(rf.Logs, &Log{
-		LogIndex:    lastIndex + 1,
-		CreateTerm:  rf.CurrentTerm,
-		Command:     command,
-		IsCommitted: false,
-		IsApplied:   false,
-	})
-	term = rf.CurrentTerm
-	rf.mu.Unlock()
-	index = rf.lastIndex()
-	log.Printf("leader insert %b to log, index is %d", command, index)
-	return index, term, true
+	// Your code here (2B).
+
+	return index, term, isLeader
 }
 
+// Kill
+// the tester doesn't halt goroutines created by Raft after each test,
+// but it does call the Kill() method. your code can use killed() to
+// check whether Kill() has been called. the use of atomic avoids the
+// need for a lock.
+//
+// the issue is that long-running goroutines use memory and may chew
+// up CPU time, perhaps causing later tests to fail and generating
+// confusing debug output. any goroutine with a long-running loop
+// should call killed() to check whether it should stop.
+//
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
@@ -358,73 +340,6 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) lastIndex() int {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	if len(rf.Logs) != 0 {
-		return rf.Logs[len(rf.Logs)-1].LogIndex
-	} else {
-		return -1
-	}
-}
-
-func (rf *Raft) lastTerm() int {
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
-	if len(rf.Logs) != 0 {
-		return rf.Logs[len(rf.Logs)-1].CreateTerm
-	} else {
-		return -1
-	}
-}
-
-//todo 执行日志复制与心跳
-func (rf *Raft) doAppendEntries(peerId int) {
-	index := rf.lastIndex()
-	term := rf.lastTerm()
-	rf.mu.RLock()
-	request := AppendEntries{
-		Term:         rf.CurrentTerm,
-		LeaderId:     rf.me,
-		PrevLogIndex: index,
-		PrevLogTerm:  term,
-		Entries:      rf.Logs,
-		LeaderCommit: rf.CommitIndex,
-	}
-	rf.mu.RUnlock()
-	go func(peer int) {
-		reply := AppendEntriesReply{}
-		ok := rf.sendAppendEntries(peer, &request, &reply)
-		if ok {
-			rf.mu.Lock()
-			//检查是否中间选举过
-			if rf.CurrentTerm != request.Term {
-				rf.mu.Unlock()
-				return
-			}
-			//检查返回的term，是否该leader过期
-			if reply.Term > rf.CurrentTerm {
-				rf.RaftStatus = FOLLOWER
-				rf.CurrentTerm = reply.Term
-				rf.VoteFor = -1
-				rf.LeaderId = -1
-				rf.mu.Unlock()
-				return
-			}
-			if reply.Success {
-				//日志同步成功，leader需要更新nextIndex数组和matchIndex数组
-				//nextIndex使用args里面的prevLogIndex更新（prevLogIndex直接在args中更新？）
-				rf.NextIndex[peerId] = request.PrevLogIndex + 1
-				//matchIndex使用nextIndex更新，他就是与leader匹配的那个index
-				rf.MatchIndex[peerId] = request.PrevLogIndex
-			} else {
-				//todo 日志同步失败
-			}
-			rf.mu.Unlock()
-		}
-	}(peerId)
-}
-
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) appendLogSignal() {
@@ -433,8 +348,6 @@ func (rf *Raft) appendLogSignal() {
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 		func() {
-			//index := rf.lastIndex()
-			//term := rf.lastTerm()
 			rf.mu.Lock()
 			//判断状态，leader才能发送
 			if rf.RaftStatus != LEADER {
@@ -448,30 +361,21 @@ func (rf *Raft) appendLogSignal() {
 				return
 			}
 			rf.LastBroadcastTime = now
+			//向follower广播心跳
+			heart := AppendEntries{
+				Term:     rf.CurrentTerm,
+				LeaderId: rf.me,
+			}
 			me := rf.me
-			//request := AppendEntries{
-			//	Term:         rf.CurrentTerm,
-			//	LeaderId:     rf.me,
-			//	PrevLogIndex: index,
-			//	PrevLogTerm:  term,
-			//	Entries:      rf.Logs,
-			//	LeaderCommit: rf.CommitIndex,
-			//}
 			rf.mu.Unlock()
 			for i := 0; i < len(rf.peers); i++ {
 				if i == me {
 					continue
 				}
-				rf.doAppendEntries(i)
-				//rf.sendAppendEntries(i, &request, &AppendEntriesReply{})
+				_ = rf.sendAppendEntries(i, &heart, &AppendEntriesReply{})
 			}
 		}()
 	}
-}
-
-//todo 日志条目应用进程
-func (rf *Raft) applyLog() {
-
 }
 
 func (rf *Raft) election() {
@@ -578,6 +482,16 @@ func (rf *Raft) election() {
 	}
 }
 
+// Make
+// the service or tester wants to create a Raft server. the ports
+// of all the Raft servers (including this one) are in peers[]. this
+// server's port is peers[me]. all the servers' peers[] arrays
+// have the same order. persister is a place for this server to
+// save its persistent state, and also initially holds the most
+// recent saved state, if any. applyCh is a channel on which the
+// tester or service expects Raft to send ApplyMsg messages.
+// Make() must return quickly, so it should start goroutines
+// for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
@@ -594,10 +508,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.LastApplied = -1
 	rf.HeartSignal = make(chan AppendEntries)
 	rf.LeaderId = -1
-	for i := 0; i < len(peers); i++ {
-		rf.NextIndex = append(rf.NextIndex, 0)
-		rf.MatchIndex = append(rf.MatchIndex, -1)
-	}
 	//rf.ElectionSignal = make(chan RequestVote)
 	//rf.ElectionFailSignal = make(chan int)
 	// initialize from state persisted before a crash

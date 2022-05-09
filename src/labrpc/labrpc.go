@@ -49,7 +49,9 @@ package labrpc
 //   pass svc to srv.AddService()
 //
 
-import "6.824/labgob"
+import (
+	"mit_ds_2021/labgob"
+)
 import "bytes"
 import "reflect"
 import "sync"
@@ -466,10 +468,14 @@ func MakeService(rcvr interface{}) *Service {
 			mtype.NumOut() != 0 {
 			// the method is not suitable for a handler
 			//fmt.Printf("bad method: %v\n", mname)
+			//log.Printf("%d - %s - %d - %s\n", mtype.NumIn(), mtype.In(2).Kind(), mtype.NumOut(), method.PkgPath)
 		} else {
 			// the method looks like a handler
 			svc.methods[mname] = method
+			//log.Printf("|%s - %s - %d\n", mtype, mname, len(method.PkgPath))
 		}
+
+		//fmt.Printf("%s - %s\n", mtype, mname)
 	}
 
 	return svc
@@ -504,6 +510,7 @@ func (svc *Service) dispatch(methname string, req reqMsg) replyMsg {
 	} else {
 		choices := []string{}
 		for k, _ := range svc.methods {
+			log.Printf("%s\n", k)
 			choices = append(choices, k)
 		}
 		log.Fatalf("labrpc.Service.dispatch(): unknown method %v in %v; expecting one of %v\n",

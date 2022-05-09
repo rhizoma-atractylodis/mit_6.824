@@ -1,9 +1,9 @@
 package kvraft
 
 import (
-	"6.824/labgob"
-	"6.824/labrpc"
-	"6.824/raft"
+	"mit_ds_2021/labgob"
+	"mit_ds_2021/labrpc"
+	"mit_ds_2021/raft"
 	"log"
 	"sync"
 	"sync/atomic"

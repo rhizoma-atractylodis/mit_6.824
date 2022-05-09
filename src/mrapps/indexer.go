@@ -7,7 +7,7 @@ package main
 //
 
 import "fmt"
-import "6.824/mr"
+import "mit_ds_2021/mr"
 
 import "strings"
 import "unicode"

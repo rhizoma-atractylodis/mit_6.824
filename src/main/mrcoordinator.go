@@ -9,7 +9,9 @@ package main
 // Please do not change this file.
 //
 
-import "6.824/mr"
+import (
+	"mit_ds_2021/mr"
+)
 import "time"
 import "os"
 import "fmt"
@@ -22,7 +24,21 @@ func main() {
 
 	m := mr.MakeCoordinator(os.Args[1:], 10)
 	for m.Done() == false {
-		time.Sleep(time.Second)
+		go m.CreateMapTask(m.InputFile)
+		m.Group.Add(1)
+		m.Group.Wait()
+		go m.CreateReduceTask(m.IntermediateFile)
+		m.Group.Add(1)
+		m.Group.Wait()
+		//if m.MapSignal {
+		//	m.MapSignal = false
+		//
+		//} else if m.ReduceSignal {
+		//	m.ReduceSignal = false
+		//
+		//} else {
+		//	fmt.Printf("master no task...\n")
+		//}
 	}
 
 	time.Sleep(time.Second)

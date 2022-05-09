@@ -1,10 +1,10 @@
 package shardkv
 
 
-import "6.824/labrpc"
-import "6.824/raft"
+import "mit_ds_2021/labrpc"
+import "mit_ds_2021/raft"
 import "sync"
-import "6.824/labgob"
+import "mit_ds_2021/labgob"
 
 
 
