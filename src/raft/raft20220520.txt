@@ -18,8 +18,8 @@ package raft
 //
 
 import (
+	"fmt"
 	"log"
-	"math"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -82,42 +82,46 @@ type Raft struct {
 	MatchIndex []int
 
 	//other
-	HeartSignal chan AppendEntries
+	LogSignal chan bool
 	//ElectionSignal     chan RequestVote
 	LeaderId          int
 	LastActiveTime    time.Time
 	LastBroadcastTime time.Time
+	ApplyLogSignal    chan ApplyMsg
+	CurrentServer     map[int]bool
 }
 
 type Log struct {
 	LogIndex    int
 	CreateTerm  int
-	Command     string
+	Command     interface{}
 	IsCommitted bool
 	IsApplied   bool
 }
 
-type AppendEntries struct {
-	Term         int
-	LeaderId     int
-	PrevLogIndex int
-	PrevLogTerm  int
-	Entries      []*Log
-	LeaderCommit int
+func (l *Log) String() string {
+	return fmt.Sprintf("{index: %d, trem: %d, command: %v, isCommitted: %v, isApplied: %v}",
+		l.LogIndex, l.CreateTerm, l.Command, l.IsCommitted, l.IsApplied)
 }
 
-type LeaderClaimArgs struct {
-	AppendEntries
-	VoteGrantedNum int
+type AppendEntries struct {
+	Term          int
+	LeaderId      int
+	PrevLogIndex  int
+	PrevLogTerm   int
+	Entries       []*Log
+	LeaderCommit  int
+	CurrentServer map[int]bool
 }
 
 type AppendEntriesReply struct {
 	Term     int
 	LeaderId int
 	Success  bool
+	Alive    bool
 }
 
-// AppendEntries todo 添加日志条目，处理心跳
+// AppendEntries todo 添加日志条目
 func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -130,6 +134,67 @@ func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 	rf.LeaderId = args.LeaderId
 	//更新活跃时间
 	rf.LastActiveTime = time.Now()
+	args.CurrentServer[rf.me] = true
+	rf.CurrentServer = args.CurrentServer
+	reply.Alive = true
+	//log.Printf("server %d current log is %v", rf.me, rf.Logs)
+	if len(args.Entries) != 0 {
+		if lastIndex(rf.Logs) == 0 {
+			rf.Logs = args.Entries
+			log.Printf("follower %d: init log %v -> %v", rf.me, args.Entries, rf.Logs)
+		} else {
+			rf.mu.Unlock()
+			for _, entry := range args.Entries {
+				rf.mu.Lock()
+				index := lastIndex(rf.Logs)
+				if index < entry.LogIndex {
+					rf.Logs = append(rf.Logs, entry)
+					log.Printf("follower %d: append log %v -> %v", rf.me, entry, rf.Logs)
+				} else {
+					if rf.Logs[lastIndex(rf.Logs)-1].CreateTerm != entry.CreateTerm {
+						rf.Logs = rf.Logs[:index-1]
+						rf.Logs = append(rf.Logs, entry)
+						log.Printf("follower %d: overwrite log %v -> %v", rf.me, entry, rf.Logs)
+					}
+				}
+				rf.mu.Unlock()
+			}
+			//args.PrevLogIndex = lastIndex(rf.Logs)
+			//args.PrevLogTerm = lastTerm(rf.Logs)
+			rf.mu.Lock()
+		}
+		//检查leader是否有更新的提交，如果有，那么在本地状态机应用并更新提交
+		if args.LeaderCommit > rf.CommitIndex {
+			//log.Printf("follower %d: commit from %d to %d", rf.me, rf.CommitIndex, args.LeaderCommit)
+			commit := args.LeaderCommit
+			if lastIndex(rf.Logs) < args.LeaderCommit {
+				//log.Printf("follower %d: commit from %d to %d", rf.me, rf.CommitIndex, lastIndex(rf.Logs))
+				commit = lastIndex(rf.Logs)
+			}
+			rf.CommitIndex = commit
+			for i := 0; i < rf.CommitIndex; i++ {
+				rf.Logs[i].IsCommitted = true
+			}
+		}
+		args.PrevLogTerm = lastTerm(rf.Logs)
+		args.PrevLogIndex = lastIndex(rf.Logs)
+		log.Printf("last index: %d, args: %p", lastIndex(rf.Logs), args)
+	} else {
+		if args.LeaderCommit > rf.CommitIndex {
+			//log.Printf("follower %d: commit from %d to %d", rf.me, rf.CommitIndex, args.LeaderCommit)
+			rf.CommitIndex = args.LeaderCommit
+			commit := args.LeaderCommit
+			if lastIndex(rf.Logs) < args.LeaderCommit {
+				//log.Printf("follower %d: commit from %d to %d", rf.me, rf.CommitIndex, lastIndex(rf.Logs))
+				commit = lastIndex(rf.Logs)
+			}
+			rf.CommitIndex = commit
+			for i := 0; i < rf.CommitIndex; i++ {
+				rf.Logs[i].IsCommitted = true
+			}
+		}
+	}
+	reply.Success = true
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntries, reply *AppendEntriesReply) bool {
@@ -146,7 +211,7 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.RLock()
 	term = rf.CurrentTerm
 	isleader = rf.RaftStatus == LEADER
-	log.Printf("server %d status is %d...", rf.me, rf.RaftStatus)
+	//log.Printf("server %d status is %d...", rf.me, rf.RaftStatus)
 	rf.mu.RUnlock()
 	return term, isleader
 }
@@ -243,22 +308,19 @@ func (rf *Raft) RequestVote(args *RequestVote, reply *RequestVoteReply) {
 	}
 	//发现更大term，更新term，转换follower，并投票
 	if args.Term > rf.CurrentTerm {
-		log.Printf("server %d expired, new term is %d from %d", rf.me, args.Term, args.CandidateId)
-		rf.CurrentTerm = args.Term
+		//log.Printf("server %d expired, new term is %d from %d", rf.me, args.Term, args.CandidateId)
 		rf.RaftStatus = FOLLOWER
-		rf.VoteFor = args.CandidateId
-		reply.VoteGranted = true
-		rf.LastActiveTime = time.Now()
-		log.Printf("server %d vote to %d", rf.me, args.CandidateId)
-		return
+		rf.CurrentTerm = args.Term
+		rf.VoteFor = -1
 	}
 	//投票，并设置只能投给一个人
 	if rf.VoteFor == -1 || rf.VoteFor == args.CandidateId {
 		rf.VoteFor = args.CandidateId
 		reply.Term = rf.CurrentTerm
+		rf.RaftStatus = FOLLOWER
 		reply.VoteGranted = true
 		rf.LastActiveTime = time.Now()
-		log.Printf("server %d vote to %d", rf.me, args.CandidateId)
+		log.Printf("election: server %d vote to %d", rf.me, args.CandidateId)
 		return
 	}
 }
@@ -312,11 +374,29 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVote, reply *RequestVot
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
 
 	// Your code here (2B).
-
-	return index, term, isLeader
+	rf.mu.Lock()
+	last := lastIndex(rf.Logs)
+	//如果不是leader，返回false
+	if rf.RaftStatus != LEADER {
+		rf.mu.Unlock()
+		return -1, -1, false
+	}
+	//构建log，并加入到leader的log_list中
+	rf.Logs = append(rf.Logs, &Log{
+		LogIndex:    last + 1,
+		CreateTerm:  rf.CurrentTerm,
+		Command:     command,
+		IsCommitted: false,
+		IsApplied:   false,
+	})
+	term = rf.CurrentTerm
+	index = lastIndex(rf.Logs)
+	rf.mu.Unlock()
+	rf.LogSignal <- true
+	//log.Printf("leader insert %v to log, index is %d", command, index)
+	return index, term, true
 }
 
 // Kill
@@ -340,13 +420,103 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+func (rf *Raft) updateCommit() {
+	//match 超过半数与leader index一致就commit
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	count := 1
+	for peerId, index := range rf.MatchIndex {
+		if count > len(rf.peers)/2 {
+			//log.Printf("leader commit log, index is %d", index)
+			rf.CommitIndex = index
+			for i := 0; i < index; i++ {
+				rf.Logs[i].IsCommitted = !rf.Logs[i].IsCommitted
+			}
+			return
+		}
+		if peerId != rf.me {
+			if index == rf.MatchIndex[rf.me] {
+				count++
+			}
+		}
+	}
+}
+
+func (rf *Raft) doAppendEntries(peerId int) {
+	go func(peer int) {
+		rf.mu.Lock()
+		request := &AppendEntries{
+			Term:          rf.CurrentTerm,
+			LeaderId:      rf.me,
+			LeaderCommit:  rf.CommitIndex,
+			CurrentServer: rf.CurrentServer,
+		}
+		request.PrevLogIndex = rf.NextIndex[peer] - 1
+		//log.Printf("server %d pre %d", peer, request.PrevLogTerm)
+		if request.PrevLogIndex == 0 {
+			if len(rf.Logs) != 0 {
+				request.PrevLogTerm = rf.CurrentTerm
+				request.Entries = rf.Logs
+			}
+			request.PrevLogTerm = rf.CurrentTerm
+			request.Entries = rf.Logs
+		} else {
+			request.PrevLogTerm = rf.Logs[request.PrevLogIndex-1].CreateTerm
+			request.Entries = rf.Logs[request.PrevLogIndex-1:]
+		}
+		rf.mu.Unlock()
+		reply := AppendEntriesReply{Alive: false}
+		ok := rf.sendAppendEntries(peer, request, &reply)
+		log.Printf("request: %p", request)
+		if ok {
+			rf.mu.Lock()
+			//检查是否中间选举过
+			rf.MatchIndex[rf.me] = lastIndex(request.Entries)
+			if rf.CurrentTerm != request.Term {
+				rf.mu.Unlock()
+				return
+			}
+			//检查返回的term，是否该leader过期
+			if reply.Term > rf.CurrentTerm {
+				rf.RaftStatus = FOLLOWER
+				rf.CurrentTerm = reply.Term
+				rf.VoteFor = -1
+				rf.LeaderId = -1
+				rf.mu.Unlock()
+				return
+			}
+			if reply.Alive {
+				rf.CurrentServer[peer] = true
+			} else {
+				rf.CurrentServer[peer] = false
+			}
+			if len(request.Entries) != 0 {
+				if reply.Success {
+					//日志同步成功，leader需要更新nextIndex数组和matchIndex数组
+					//nextIndex使用args里面的prevLogIndex更新（prevLogIndex直接在args中更新？）
+					rf.NextIndex[peer] = request.PrevLogIndex + 1
+					//matchIndex使用nextIndex更新，他就是与leader匹配的那个index
+					rf.MatchIndex[peer] = request.PrevLogIndex
+					rf.mu.Unlock()
+					rf.updateCommit()
+					rf.mu.Lock()
+				} else {
+					//todo 日志同步失败
+				}
+			}
+			rf.mu.Unlock()
+		}
+	}(peerId)
+}
+
 // The ticker go routine starts a new election if this peer hasn't received
-// heartsbeats recently.
+// hearts beats recently.
 func (rf *Raft) appendLogSignal() {
 	for rf.killed() == false {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
+		time.Sleep(time.Millisecond * 10)
 		func() {
 			rf.mu.Lock()
 			//判断状态，leader才能发送
@@ -361,18 +531,33 @@ func (rf *Raft) appendLogSignal() {
 				return
 			}
 			rf.LastBroadcastTime = now
-			//向follower广播心跳
-			heart := AppendEntries{
-				Term:     rf.CurrentTerm,
-				LeaderId: rf.me,
-			}
 			me := rf.me
+			//var request AppendEntries
+			//select {
+			//case <-rf.LogSignal:
+			//	request = AppendEntries{
+			//		Term:          rf.CurrentTerm,
+			//		LeaderId:      rf.me,
+			//		LeaderCommit:  rf.CommitIndex,
+			//		CurrentServer: rf.CurrentServer,
+			//		PrevLogIndex:  lastIndex(rf.Logs),
+			//		PrevLogTerm:   lastTerm(rf.Logs),
+			//		Entries:       rf.Logs,
+			//	}
+			//	break
+			//default:
+			//	request = AppendEntries{
+			//		Term:          rf.CurrentTerm,
+			//		LeaderId:      rf.me,
+			//		LeaderCommit:  rf.CommitIndex,
+			//		CurrentServer: rf.CurrentServer,
+			//	}
+			//}
 			rf.mu.Unlock()
 			for i := 0; i < len(rf.peers); i++ {
-				if i == me {
-					continue
+				if i != me {
+					rf.doAppendEntries(i)
 				}
-				_ = rf.sendAppendEntries(i, &heart, &AppendEntriesReply{})
 			}
 		}()
 	}
@@ -381,13 +566,14 @@ func (rf *Raft) appendLogSignal() {
 func (rf *Raft) election() {
 	back := 0
 	for rf.killed() == false {
+		time.Sleep(time.Millisecond * 10)
 		back++
 		func() {
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
 			//设置随机选举超时(超过这个时间才选举)
 			now := time.Now()
-			timeout := time.Duration(rand.Intn(500*back)+300) * time.Millisecond
+			timeout := time.Duration(300+rand.Int31n(int32(500*back))) * time.Millisecond
 			interval := now.Sub(rf.LastActiveTime)
 			//状态转换
 			if rf.RaftStatus == FOLLOWER {
@@ -397,19 +583,29 @@ func (rf *Raft) election() {
 			}
 			//选举逻辑
 			if rf.RaftStatus == CANDIDATE && interval >= timeout {
+				//log.Printf("election: server %d start election", rf.me)
 				//字段初始化
 				rf.VoteFor = rf.me
 				rf.CurrentTerm++
 				rf.LastActiveTime = now
+				if rf.LeaderId != -1 {
+					rf.CurrentServer[rf.LeaderId] = false
+				}
 				//构造投票请求，并发拉票
 				requestVote := RequestVote{
 					Term:         rf.CurrentTerm,
 					CandidateId:  rf.me,
-					LastLogIndex: -1,
+					LastLogIndex: 0,
 					LastLogTerm:  -1,
 				}
 				maxTerm := rf.CurrentTerm
 				me := rf.me
+				serverNum := 0
+				for i := 0; i < len(rf.peers); i++ {
+					if rf.CurrentServer[i] {
+						serverNum++
+					}
+				}
 				rf.mu.Unlock()
 				type VoteResult struct {
 					peerId int
@@ -445,7 +641,7 @@ func (rf *Raft) election() {
 								maxTerm = voteResult.reply.Term
 							}
 						}
-						if replyNum == len(rf.peers) {
+						if replyNum == serverNum {
 							goto AFTER_VOTE
 						}
 					default:
@@ -459,7 +655,7 @@ func (rf *Raft) election() {
 				}
 				//term变大，更新term，转换follower并return
 				if rf.CurrentTerm < maxTerm {
-					log.Printf("election: server %d exit election because expired...", rf.me)
+					//log.Printf("election: server %d exit election because expired...", rf.me)
 					rf.CurrentTerm = maxTerm
 					rf.RaftStatus = FOLLOWER
 					rf.VoteFor = -1
@@ -467,18 +663,72 @@ func (rf *Raft) election() {
 					return
 				}
 				//获取大多数选票，转换leader并return
-				if float64(voteNum) >= math.Ceil(float64(len(rf.peers))/2) {
+				if voteNum > serverNum/2 {
 					log.Printf("election: server %d be elected leader...", rf.me)
 					rf.RaftStatus = LEADER
 					rf.LeaderId = rf.me
+					rf.NextIndex = make([]int, len(rf.peers), len(rf.peers))
+					rf.MatchIndex = make([]int, len(rf.peers), len(rf.peers))
+					for i := 0; i < len(rf.peers); i++ {
+						rf.NextIndex[i] = lastIndex(rf.Logs) + 1
+						rf.MatchIndex[i] = 0
+					}
 					rf.LastBroadcastTime = time.Unix(0, 0)
 					return
 				} else {
 					rf.RaftStatus = FOLLOWER
+					rf.VoteFor = -1
+					rf.LeaderId = -1
 					return
 				}
 			}
 		}()
+	}
+}
+
+func (rf *Raft) applyLog() {
+	//noMore := false
+	for rf.killed() == false {
+		//if noMore {
+		//	time.Sleep(time.Millisecond * 10)
+		//}
+		func() {
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			//判断commit和apply index关系，如果commit index变大，则需要有应用的条目
+			for rf.CommitIndex > rf.LastApplied {
+				rf.LastApplied += 1
+				l := rf.Logs[rf.LastApplied-1]
+				//如果需要提交，拼接ApplyMsg发送到applyLogSignal
+				applyMsg := ApplyMsg{
+					Command:      l.Command,
+					CommandIndex: l.LogIndex,
+					CommandValid: true,
+				}
+				rf.ApplyLogSignal <- applyMsg
+				rf.Logs[rf.LastApplied-1].IsApplied = true
+				//log.Printf("follower %d log %v", rf.me, rf.Logs)
+				//如果需要继续提交，将more置为true
+				//noMore = false
+			}
+			//noMore = true
+		}()
+	}
+}
+
+func lastIndex(logs []*Log) int {
+	if len(logs) != 0 {
+		return logs[len(logs)-1].LogIndex
+	} else {
+		return 0
+	}
+}
+
+func lastTerm(logs []*Log) int {
+	if len(logs) != 0 {
+		return logs[len(logs)-1].CreateTerm
+	} else {
+		return -1
 	}
 }
 
@@ -504,16 +754,20 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.CurrentTerm = 0
 	rf.VoteFor = -1
 	rf.Logs = []*Log{}
-	rf.CommitIndex = -1
-	rf.LastApplied = -1
-	rf.HeartSignal = make(chan AppendEntries)
+	rf.CommitIndex = 0
+	rf.LastApplied = 0
+	rf.LogSignal = make(chan bool)
 	rf.LeaderId = -1
-	//rf.ElectionSignal = make(chan RequestVote)
-	//rf.ElectionFailSignal = make(chan int)
+	rf.ApplyLogSignal = applyCh
+	rf.CurrentServer = make(map[int]bool, len(rf.peers))
+	for i := 0; i < len(rf.peers); i++ {
+		rf.CurrentServer[i] = true
+	}
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	// start ticker goroutine to start elections
 	go rf.election()
 	go rf.appendLogSignal()
+	go rf.applyLog()
 	return rf
 }

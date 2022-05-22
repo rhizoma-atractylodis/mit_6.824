@@ -130,10 +130,6 @@ func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 		rf.RaftStatus = FOLLOWER
 		rf.CurrentTerm = args.Term
 	}
-	if rf.CurrentTerm > args.Term {
-		reply.Term = rf.CurrentTerm
-		return
-	}
 	//保存新的leader
 	rf.LeaderId = args.LeaderId
 	//更新活跃时间
@@ -142,67 +138,65 @@ func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 	rf.CurrentServer = args.CurrentServer
 	reply.Alive = true
 	//log.Printf("server %d current log is %v", rf.me, rf.Logs)
-	//if len(args.Entries) != 0 {
-	//log.Printf("follower %d log %v", rf.me, rf.Logs)
-	if lastIndex(rf.Logs) == 0 {
-		rf.Logs = args.Entries
-	} else {
-		rf.mu.Unlock()
-		for _, entry := range args.Entries {
-			rf.mu.Lock()
-			index := lastIndex(rf.Logs)
-			if index < entry.LogIndex {
-				rf.Logs = append(rf.Logs, entry)
-				if entry.IsApplied {
-					rf.sendApply(entry)
-				}
-				log.Printf("follower %d: append log %v -> %v from leader %d", rf.me, entry, rf.Logs, args.LeaderId)
-			} else {
-				if rf.Logs[lastIndex(rf.Logs)-1].CreateTerm != entry.CreateTerm {
-					rf.Logs = rf.Logs[:index-1]
-					rf.Logs = append(rf.Logs, entry)
-					if entry.IsApplied {
-						rf.sendApply(entry)
-					}
-					log.Printf("follower %d: overwrite log %v -> %v from leader %d", rf.me, entry, rf.Logs, args.LeaderId)
-				}
-			}
+	if len(args.Entries) != 0 {
+		//log.Printf("follower %d log %v", rf.me, rf.Logs)
+		if lastIndex(rf.Logs) == 0 {
+			rf.Logs = args.Entries
+		} else {
 			rf.mu.Unlock()
+			for _, entry := range args.Entries {
+				rf.mu.Lock()
+				index := lastIndex(rf.Logs)
+				if index < entry.LogIndex {
+					rf.Logs = append(rf.Logs, entry)
+					log.Printf("follower %d: append log %v -> %v from leader %d", rf.me, entry, rf.Logs, args.LeaderId)
+				} else {
+					if rf.Logs[lastIndex(rf.Logs)-1].CreateTerm <= entry.CreateTerm {
+						rf.Logs = rf.Logs[:index-1]
+						rf.Logs = append(rf.Logs, entry)
+						log.Printf("follower %d: overwrite log %v -> %v from leader %d", rf.me, entry, rf.Logs, args.LeaderId)
+					} else {
+						reply.Term = rf.CurrentTerm
+						reply.Success = false
+						return
+					}
+				}
+				rf.mu.Unlock()
+			}
+			//args.PrevLogIndex = lastIndex(rf.Logs)
+			//args.PrevLogTerm = lastTerm(rf.Logs)
+			rf.mu.Lock()
 		}
-		//args.PrevLogIndex = lastIndex(rf.Logs)
+		//检查leader是否有更新的提交，如果有，那么在本地状态机应用并更新提交
+		if args.LeaderCommit > rf.CommitIndex {
+			//log.Printf("follower %d: commit from %d to %d", rf.me, rf.CommitIndex, args.LeaderCommit)
+			commit := args.LeaderCommit
+			if lastIndex(rf.Logs) < args.LeaderCommit {
+				//log.Printf("follower %d: commit from %d to %d", rf.me, rf.CommitIndex, lastIndex(rf.Logs))
+				commit = lastIndex(rf.Logs)
+			}
+			rf.CommitIndex = commit
+			for i := 0; i < rf.CommitIndex; i++ {
+				rf.Logs[i].IsCommitted = true
+			}
+		}
 		//args.PrevLogTerm = lastTerm(rf.Logs)
-		rf.mu.Lock()
-	}
-	//检查leader是否有更新的提交，如果有，那么在本地状态机应用并更新提交
-	if args.LeaderCommit > rf.CommitIndex {
-		log.Printf("follower %d: commit from %d to %d", rf.me, rf.CommitIndex, args.LeaderCommit)
-		commit := args.LeaderCommit
-		if lastIndex(rf.Logs) < args.LeaderCommit {
-			log.Printf("follower %d: commit from %d to %d", rf.me, rf.CommitIndex, lastIndex(rf.Logs))
-			commit = lastIndex(rf.Logs)
+		//args.PrevLogIndex = lastIndex(rf.Logs)
+	} else {
+		if args.LeaderCommit > rf.CommitIndex {
+			//log.Printf("follower %d: commit from %d to %d", rf.me, rf.CommitIndex, args.LeaderCommit)
+			rf.CommitIndex = args.LeaderCommit
+			commit := args.LeaderCommit
+			if lastIndex(rf.Logs) < args.LeaderCommit {
+				//log.Printf("follower %d: commit from %d to %d", rf.me, rf.CommitIndex, lastIndex(rf.Logs))
+				commit = lastIndex(rf.Logs)
+			}
+			rf.CommitIndex = commit
+			for i := 0; i < rf.CommitIndex; i++ {
+				rf.Logs[i].IsCommitted = true
+			}
 		}
-		rf.CommitIndex = commit
-		for i := 0; i < rf.CommitIndex; i++ {
-			rf.Logs[i].IsCommitted = true
-		}
 	}
-	//args.PrevLogTerm = lastTerm(rf.Logs)
-	//args.PrevLogIndex = lastIndex(rf.Logs)
-	//} else {
-	//	if args.LeaderCommit > rf.CommitIndex {
-	//		//log.Printf("follower %d: commit from %d to %d", rf.me, rf.CommitIndex, args.LeaderCommit)
-	//		rf.CommitIndex = args.LeaderCommit
-	//		commit := args.LeaderCommit
-	//		if lastIndex(rf.Logs) < args.LeaderCommit {
-	//			//log.Printf("follower %d: commit from %d to %d", rf.me, rf.CommitIndex, lastIndex(rf.Logs))
-	//			commit = lastIndex(rf.Logs)
-	//		}
-	//		rf.CommitIndex = commit
-	//		for i := 0; i < rf.CommitIndex; i++ {
-	//			rf.Logs[i].IsCommitted = true
-	//		}
-	//	}
-	//}
 	reply.Success = true
 }
 
@@ -400,14 +394,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	})
 	term = rf.CurrentTerm
 	index = lastIndex(rf.Logs)
-	rf.NextIndex[rf.me] += 1
 	rf.mu.Unlock()
-	//for i := 0; i < len(rf.peers); i++ {
-	//	if i != rf.me {
-	//		rf.LogSignal <- true
-	//	}
-	//}
-	log.Printf("leader %d append %v to log -> %v", rf.me, command, rf.Logs)
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			rf.LogSignal <- true
+		}
+	}
+	//log.Printf("leader %d insert %v to log, index is %d -> %v", rf.me, command, index, rf.Logs)
 	return index, term, true
 }
 
@@ -461,22 +454,46 @@ func (rf *Raft) updateCommit() {
 
 func (rf *Raft) doAppendEntries(peerId int) {
 	go func(peer int) {
+		//rf.mu.Lock()
+		//request.PrevLogIndex = rf.NextIndex[peer] - 1
+		//if request.PrevLogIndex == -1 {
+		//	request.PrevLogTerm = lastTerm(rf.Logs)
+		//	request.Entries = rf.Logs
+		//} else {
+		//	request.PrevLogTerm = rf.Logs[request.PrevLogIndex].CreateTerm
+		//	request.Entries = rf.Logs[request.PrevLogIndex:]
+		//}
+		//rf.mu.Unlock()
 		rf.mu.Lock()
-		request := AppendEntries{
-			Term:          rf.CurrentTerm,
-			LeaderId:      rf.me,
-			LeaderCommit:  rf.CommitIndex,
-			CurrentServer: rf.CurrentServer,
-			PrevLogIndex:  rf.NextIndex[peer] - 1,
-			PrevLogTerm:   lastTerm(rf.Logs),
-			Entries:       rf.Logs,
+		var request AppendEntries
+		select {
+		case <-rf.LogSignal:
+			request = AppendEntries{
+				Term:          rf.CurrentTerm,
+				LeaderId:      rf.me,
+				LeaderCommit:  rf.CommitIndex,
+				CurrentServer: rf.CurrentServer,
+				PrevLogIndex:  rf.NextIndex[peer] - 1,
+				PrevLogTerm:   lastTerm(rf.Logs),
+				Entries:       rf.Logs,
+			}
+			break
+		default:
+			request = AppendEntries{
+				Term:          rf.CurrentTerm,
+				LeaderId:      rf.me,
+				LeaderCommit:  rf.CommitIndex,
+				CurrentServer: rf.CurrentServer,
+			}
 		}
-		if request.PrevLogIndex == 0 {
-			request.PrevLogTerm = lastTerm(rf.Logs)
-			request.Entries = rf.Logs
-		} else {
-			request.PrevLogTerm = rf.Logs[request.PrevLogIndex-1].CreateTerm
-			request.Entries = rf.Logs[request.PrevLogIndex:]
+		if len(request.Entries) != 0 {
+			if request.PrevLogIndex == 0 {
+				request.PrevLogTerm = lastTerm(rf.Logs)
+				request.Entries = rf.Logs
+			} else {
+				request.PrevLogTerm = rf.Logs[request.PrevLogIndex-1].CreateTerm
+				request.Entries = rf.Logs[request.PrevLogIndex:]
+			}
 		}
 		rf.mu.Unlock()
 		reply := AppendEntriesReply{Alive: false}
@@ -510,15 +527,13 @@ func (rf *Raft) doAppendEntries(peerId int) {
 					rf.NextIndex[peer] = request.PrevLogIndex + len(request.Entries) + 1
 					//matchIndex使用nextIndex更新，他就是与leader匹配的那个index
 					rf.MatchIndex[peer] = rf.NextIndex[peer] - 1
-					log.Printf("leader %d next index list: %v", rf.me, rf.NextIndex)
-					log.Printf("leader %d match index list: %v", rf.me, rf.MatchIndex)
+					//log.Printf("leader %d next index list: %v", rf.me, rf.NextIndex)
+					//log.Printf("leader %d match index list: %v", rf.me, rf.MatchIndex)
 					rf.mu.Unlock()
 					rf.updateCommit()
 					rf.mu.Lock()
 				} else {
 					//todo 日志同步失败
-					rf.NextIndex[peer] = 1
-					rf.MatchIndex[peer] = 0
 				}
 			}
 			rf.mu.Unlock()
@@ -696,7 +711,12 @@ func (rf *Raft) applyLog() {
 				rf.LastApplied += 1
 				l := rf.Logs[rf.LastApplied-1]
 				//如果需要提交，拼接ApplyMsg发送到applyLogSignal
-				rf.sendApply(l)
+				applyMsg := ApplyMsg{
+					Command:      l.Command,
+					CommandIndex: l.LogIndex,
+					CommandValid: true,
+				}
+				rf.ApplyLogSignal <- applyMsg
 				rf.Logs[rf.LastApplied-1].IsApplied = true
 				//log.Printf("follower %d log %v", rf.me, rf.Logs)
 				//如果需要继续提交，将more置为true
@@ -705,15 +725,6 @@ func (rf *Raft) applyLog() {
 			//noMore = true
 		}()
 	}
-}
-
-func (rf *Raft) sendApply(entry *Log) {
-	applyMsg := ApplyMsg{
-		Command:      entry.Command,
-		CommandIndex: entry.LogIndex,
-		CommandValid: true,
-	}
-	rf.ApplyLogSignal <- applyMsg
 }
 
 func lastIndex(logs []*Log) int {
