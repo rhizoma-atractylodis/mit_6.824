@@ -115,10 +115,12 @@ type AppendEntries struct {
 }
 
 type AppendEntriesReply struct {
-	Term     int
-	LeaderId int
-	Success  bool
-	Alive    bool
+	Term          int
+	LeaderId      int
+	Success       bool
+	Alive         bool
+	ConflictIndex int
+	ConflictTerm  int
 }
 
 // AppendEntries 添加日志条目
@@ -144,7 +146,9 @@ func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 	reply.Alive = true
 	//log.Printf("server %d current log is %v", rf.me, rf.Logs)
 	if len(args.Entries) != 0 {
-		log.Printf("follower %d log %v", rf.me, args.Entries)
+		if args.PrevLogIndex != lastIndex(rf.Logs) {
+			return
+		}
 		if lastIndex(rf.Logs) == 0 {
 			rf.Logs = args.Entries
 		} else {
@@ -161,47 +165,24 @@ func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 						rf.Logs = append(rf.Logs, entry)
 						log.Printf("follower %d: overwrite log %v -> %v from leader %d", rf.me, entry, rf.Logs, args.LeaderId)
 					}
-					//else {
-					//	reply.Term = rf.CurrentTerm
-					//	reply.Success = false
-					//	return
-					//}
 				}
 				rf.mu.Unlock()
 			}
-			//args.PrevLogIndex = lastIndex(rf.Logs)
-			//args.PrevLogTerm = lastTerm(rf.Logs)
 			rf.mu.Lock()
 		}
-		//检查leader是否有更新的提交，如果有，那么在本地状态机应用并更新提交
-		if args.LeaderCommit > rf.CommitIndex {
-			//log.Printf("follower %d: commit from %d to %d", rf.me, rf.CommitIndex, args.LeaderCommit)
-			commit := args.LeaderCommit
-			if lastIndex(rf.Logs) < args.LeaderCommit {
-				//log.Printf("follower %d: commit from %d to %d", rf.me, rf.CommitIndex, lastIndex(rf.Logs))
-				commit = lastIndex(rf.Logs)
-			}
-			rf.CommitIndex = commit
-			//log.Printf("commit %d", commit)
-			for i := 0; i < rf.CommitIndex; i++ {
-				rf.Logs[i].IsCommitted = true
-			}
+	}
+	//检查leader是否有更新的提交，如果有，那么在本地状态机应用并更新提交
+	if args.LeaderCommit > rf.CommitIndex {
+		//log.Printf("follower %d: commit from %d to %d", rf.me, rf.CommitIndex, args.LeaderCommit)
+		commit := args.LeaderCommit
+		if lastIndex(rf.Logs) < args.LeaderCommit {
+			//log.Printf("follower %d: commit from %d to %d", rf.me, rf.CommitIndex, lastIndex(rf.Logs))
+			commit = lastIndex(rf.Logs)
 		}
-		//args.PrevLogTerm = lastTerm(rf.Logs)
-		//args.PrevLogIndex = lastIndex(rf.Logs)
-	} else {
-		if args.LeaderCommit > rf.CommitIndex {
-			//log.Printf("follower %d: commit from %d to %d", rf.me, rf.CommitIndex, args.LeaderCommit)
-			rf.CommitIndex = args.LeaderCommit
-			commit := args.LeaderCommit
-			if lastIndex(rf.Logs) < args.LeaderCommit {
-				//log.Printf("follower %d: commit from %d to %d", rf.me, rf.CommitIndex, lastIndex(rf.Logs))
-				commit = lastIndex(rf.Logs)
-			}
-			rf.CommitIndex = commit
-			for i := 0; i < rf.CommitIndex; i++ {
-				rf.Logs[i].IsCommitted = true
-			}
+		rf.CommitIndex = commit
+		//log.Printf("commit %d", commit)
+		for i := 0; i < rf.CommitIndex; i++ {
+			rf.Logs[i].IsCommitted = true
 		}
 	}
 	reply.Success = true
@@ -441,21 +422,17 @@ func (rf *Raft) updateCommit() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	count, alive := 0, 0
-	//log.Printf("living server: %v", rf.CurrentServer)
 	for _, isAlive := range rf.CurrentServer {
 		if isAlive {
 			alive += 1
 		}
 	}
-	//log.Printf("alive number is %d", alive)
 	for _, index := range rf.MatchIndex {
 		if index == rf.MatchIndex[rf.me] {
 			count += 1
-			//log.Printf("count: %d", count)
 		}
 	}
 	if count > alive/2 {
-		log.Printf("leader %d commit log, index is %d", rf.me, rf.MatchIndex[rf.me])
 		for i := rf.CommitIndex; i < rf.MatchIndex[rf.me]; i++ {
 			rf.Logs[i].IsCommitted = true
 		}
@@ -537,8 +514,9 @@ func (rf *Raft) doAppendEntries(peerId int) {
 					rf.mu.Lock()
 				} else {
 					//todo 日志同步失败 回退next index bug：新leader初始化next index时不能更新选举前断掉的follower
-					rf.NextIndex[peer] -= 1
-					rf.MatchIndex[peer] = 0
+					if rf.NextIndex[peer] > 0 {
+						rf.NextIndex[peer] -= 1
+					}
 					log.Printf("follower %d fail", peer)
 				}
 			}
