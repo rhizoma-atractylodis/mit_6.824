@@ -146,9 +146,24 @@ func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 	reply.Alive = true
 	//log.Printf("server %d current log is %v", rf.me, rf.Logs)
 	if len(args.Entries) != 0 {
-		if args.PrevLogIndex != lastIndex(rf.Logs) {
-			return
+		//todo 日志冲突检测
+		if len(rf.Logs) > 0 {
+			if args.PrevLogIndex > lastIndex(rf.Logs) {
+				reply.ConflictIndex = lastIndex(rf.Logs) + 1
+				return
+			}
+			if rf.Logs[args.PrevLogIndex-1].CreateTerm != args.PrevLogTerm {
+				reply.ConflictTerm = rf.Logs[args.PrevLogIndex-1].CreateTerm
+				for i := 0; i < args.PrevLogIndex; i++ {
+					if rf.Logs[i].CreateTerm == reply.ConflictTerm {
+						reply.ConflictIndex = i + 1
+						break
+					}
+				}
+				return
+			}
 		}
+		//日志复制
 		if lastIndex(rf.Logs) == 0 {
 			rf.Logs = args.Entries
 		} else {
@@ -473,10 +488,15 @@ func (rf *Raft) doAppendEntries(peerId int) {
 				request.Entries = rf.Logs[request.PrevLogIndex:]
 			}
 		}
-		log.Printf("next list: %v", rf.NextIndex)
-		log.Printf("server %d (pre %d) send log address: %p", peer, request.PrevLogIndex, request.Entries)
+		//log.Printf("next list: %v", rf.NextIndex)
+		//log.Printf("server %d (pre %d) send log address: %p", peer, request.PrevLogIndex, request.Entries)
 		rf.mu.Unlock()
-		reply := AppendEntriesReply{Alive: false, Success: false}
+		reply := AppendEntriesReply{
+			Alive:         false,
+			Success:       false,
+			ConflictIndex: -1,
+			ConflictTerm:  -1,
+		}
 		ok := rf.sendAppendEntries(peer, &request, &reply)
 		if ok {
 			rf.mu.Lock()
@@ -514,10 +534,24 @@ func (rf *Raft) doAppendEntries(peerId int) {
 					rf.mu.Lock()
 				} else {
 					//todo 日志同步失败 回退next index bug：新leader初始化next index时不能更新选举前断掉的follower
-					if rf.NextIndex[peer] > 0 {
-						rf.NextIndex[peer] -= 1
-					}
 					log.Printf("follower %d fail", peer)
+					if reply.ConflictTerm != -1 {
+						conflictIndex := -1
+						//搜索conflictTerm对应的最大的index
+						for i := request.PrevLogIndex; i > rf.MatchIndex[peer]; i-- {
+							if rf.Logs[i].CreateTerm == reply.ConflictTerm {
+								conflictIndex = i
+								break
+							}
+						}
+						if conflictIndex == -1 {
+							rf.NextIndex[peer] = reply.ConflictIndex
+						} else {
+							rf.NextIndex[peer] = conflictIndex
+						}
+					} else {
+						rf.NextIndex[peer] = reply.ConflictIndex
+					}
 				}
 			}
 			rf.mu.Unlock()
