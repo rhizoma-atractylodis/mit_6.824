@@ -144,41 +144,47 @@ func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 	//更新活跃时间
 	rf.LastActiveTime = time.Now()
 	reply.Alive = true
-	//log.Printf("leader %d current commit is %v, server commit %d", args.LeaderId, args.LeaderCommit, rf.CommitIndex)
-	//日志冲突检测
-	if (len(rf.Logs) > 0) && (args.PrevLogIndex != 0) {
-		if args.PrevLogIndex > lastIndex(rf.Logs) {
-			reply.ConflictIndex = lastIndex(rf.Logs) + 1
-			return
-		}
-		if rf.Logs[args.PrevLogIndex-1].CreateTerm != args.PrevLogTerm {
-			reply.ConflictTerm = rf.Logs[args.PrevLogIndex-1].CreateTerm
-			for i := 0; i < args.PrevLogIndex; i++ {
-				if rf.Logs[i].CreateTerm == reply.ConflictTerm {
-					reply.ConflictIndex = i + 1
-					break
-				}
+	//log.Printf("server %d current log is %v", rf.me, rf.Logs)
+	if len(args.Entries) != 0 {
+		//todo 日志冲突检测
+		if (len(rf.Logs) > 0) && (args.PrevLogIndex != 0) {
+			if args.PrevLogIndex > lastIndex(rf.Logs) {
+				reply.ConflictIndex = lastIndex(rf.Logs) + 1
+				return
 			}
-			return
+			if rf.Logs[args.PrevLogIndex-1].CreateTerm != args.PrevLogTerm {
+				reply.ConflictTerm = rf.Logs[args.PrevLogIndex-1].CreateTerm
+				for i := 0; i < args.PrevLogIndex; i++ {
+					if rf.Logs[i].CreateTerm == reply.ConflictTerm {
+						reply.ConflictIndex = i + 1
+						break
+					}
+				}
+				return
+			}
 		}
-	}
-	//日志复制
-	//log.Printf("entries: %v", args.Entries)
-	if lastIndex(rf.Logs) == 0 {
-		rf.Logs = args.Entries
-	} else {
-		for _, entry := range args.Entries {
-			index := lastIndex(rf.Logs)
-			if index < entry.LogIndex {
-				rf.Logs = append(rf.Logs, entry)
-				//log.Printf("follower %d: append log %v -> %v from leader %d", rf.me, entry, rf.Logs, args.LeaderId)
-			} else {
-				if rf.Logs[lastIndex(rf.Logs)-1].CreateTerm != entry.CreateTerm {
-					rf.Logs = rf.Logs[:entry.LogIndex-1]
+		//日志复制
+		//log.Printf("entries: %v", args.Entries)
+		if lastIndex(rf.Logs) == 0 {
+			rf.Logs = args.Entries
+		} else {
+			//rf.mu.Unlock()
+			for _, entry := range args.Entries {
+				//rf.mu.Lock()
+				index := lastIndex(rf.Logs)
+				if index < entry.LogIndex {
 					rf.Logs = append(rf.Logs, entry)
-					//log.Printf("follower %d: overwrite log %v -> %v from leader %d", rf.me, entry, rf.Logs, args.LeaderId)
+					log.Printf("follower %d: append log %v -> %v from leader %d", rf.me, entry, rf.Logs, args.LeaderId)
+				} else {
+					if rf.Logs[lastIndex(rf.Logs)-1].CreateTerm != entry.CreateTerm {
+						rf.Logs = rf.Logs[:index-1]
+						rf.Logs = append(rf.Logs, entry)
+						log.Printf("follower %d: overwrite log %v -> %v from leader %d", rf.me, entry, rf.Logs, args.LeaderId)
+					}
 				}
+				//rf.mu.Unlock()
 			}
+			//rf.mu.Lock()
 		}
 	}
 	//检查leader是否有更新的提交，如果有，那么在本地状态机应用并更新提交
@@ -190,7 +196,7 @@ func (rf *Raft) AppendEntries(args *AppendEntries, reply *AppendEntriesReply) {
 			commit = lastIndex(rf.Logs)
 		}
 		rf.CommitIndex = commit
-		//log.Printf("follower %d commit %v", rf.me, rf.Logs[rf.CommitIndex-1])
+		log.Printf("follower %d commit %v", rf.me, rf.Logs[rf.CommitIndex-1])
 		for i := 0; i < rf.CommitIndex; i++ {
 			rf.Logs[i].IsCommitted = true
 		}
@@ -397,6 +403,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term = rf.CurrentTerm
 	index = lastIndex(rf.Logs)
 	rf.mu.Unlock()
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			rf.LogSignal <- true
+		}
+	}
 	//log.Printf("leader %d insert %v to log, index is %d -> %v", rf.me, command, index, rf.Logs)
 	return index, term, true
 }
@@ -444,7 +455,6 @@ func (rf *Raft) updateCommit() {
 	}
 	if count > alive/2 {
 		for i := rf.CommitIndex; i < rf.MatchIndex[rf.me]; i++ {
-			log.Printf("leader %d commit %v", rf.me, rf.Logs[i])
 			rf.Logs[i].IsCommitted = true
 		}
 		rf.CommitIndex = rf.MatchIndex[rf.me]
@@ -454,30 +464,44 @@ func (rf *Raft) updateCommit() {
 func (rf *Raft) doAppendEntries(peerId int) {
 	go func(peer int) {
 		rf.mu.Lock()
-		request := AppendEntries{
-			Term:          rf.CurrentTerm,
-			LeaderId:      rf.me,
-			LeaderCommit:  rf.CommitIndex,
-			CurrentServer: rf.CurrentServer,
-			PrevLogIndex:  rf.NextIndex[peer] - 1,
-			PrevLogTerm:   lastTerm(rf.Logs),
-			Entries:       rf.Logs,
+		var request AppendEntries
+		select {
+		case <-rf.LogSignal:
+			request = AppendEntries{
+				Term:          rf.CurrentTerm,
+				LeaderId:      rf.me,
+				LeaderCommit:  rf.CommitIndex,
+				CurrentServer: rf.CurrentServer,
+				PrevLogIndex:  rf.NextIndex[peer] - 1,
+				PrevLogTerm:   lastTerm(rf.Logs),
+				Entries:       rf.Logs,
+			}
+			break
+		default:
+			request = AppendEntries{
+				Term:          rf.CurrentTerm,
+				LeaderId:      rf.me,
+				LeaderCommit:  rf.CommitIndex,
+				CurrentServer: rf.CurrentServer,
+			}
 		}
-		if request.PrevLogIndex <= 0 {
-			request.PrevLogIndex = 0
-			request.PrevLogTerm = lastTerm(rf.Logs)
-			request.Entries = rf.Logs
-		} else {
-			request.PrevLogTerm = rf.Logs[request.PrevLogIndex-1].CreateTerm
-			request.Entries = rf.Logs[request.PrevLogIndex:]
+		if len(request.Entries) != 0 {
+			if request.PrevLogIndex == 0 {
+				request.PrevLogTerm = lastTerm(rf.Logs)
+				request.Entries = rf.Logs
+			} else {
+				request.PrevLogTerm = rf.Logs[request.PrevLogIndex-1].CreateTerm
+				request.Entries = rf.Logs[request.PrevLogIndex:]
+			}
 		}
 		//log.Printf("next list: %v", rf.NextIndex)
 		//log.Printf("server %d (pre %d) send log address: %p", peer, request.PrevLogIndex, request.Entries)
 		rf.mu.Unlock()
 		reply := AppendEntriesReply{
-			Alive:        false,
-			Success:      false,
-			ConflictTerm: -1,
+			Alive:         false,
+			Success:       false,
+			ConflictIndex: -1,
+			ConflictTerm:  -1,
 		}
 		ok := rf.sendAppendEntries(peer, &request, &reply)
 		if ok {
@@ -506,9 +530,10 @@ func (rf *Raft) doAppendEntries(peerId int) {
 					//matchIndex使用nextIndex更新，他就是与leader匹配的那个index
 					rf.MatchIndex[peer] = rf.NextIndex[peer] - 1
 					log.Printf("leader %d next index list: %v", rf.me, rf.NextIndex)
-					log.Printf("leader %d match index list: %v", rf.me, rf.MatchIndex)
+					//log.Printf("leader %d match index list: %v", rf.me, rf.MatchIndex)
 				} else {
-					//log.Printf("follower %d fail", peer)
+					//todo 日志同步失败 回退next index bug：新leader初始化next index时不能更新选举前断掉的follower
+					log.Printf("follower %d fail", peer)
 					if reply.ConflictTerm != -1 {
 						conflictIndex := -1
 						//搜索conflictTerm对应的最大的index
@@ -520,7 +545,7 @@ func (rf *Raft) doAppendEntries(peerId int) {
 						}
 						if conflictIndex == -1 {
 							rf.NextIndex[peer] = reply.ConflictIndex
-							//log.Printf("follower %d, next index %d", peer, rf.NextIndex[peer])
+							log.Printf("follower %d, next index %d", peer, rf.NextIndex[peer])
 						} else {
 							rf.NextIndex[peer] = conflictIndex
 						}
