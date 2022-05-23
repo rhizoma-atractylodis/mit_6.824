@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="PublishConfigData" serverName="mit_test" deleteMissingItems="true" preserveFilePermissions="true" remoteFilesAllowedToDisappearOnAutoupload="false">
+    <serverData>
+      <paths name="mit_test">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/root/mit_ds_2021" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+        </serverdata>
+      </paths>
+    </serverData>
+  </component>
+</project>

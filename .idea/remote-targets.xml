@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="RemoteTargetsManager">
+    <targets>
+      <target name="root@164.52.88.2:22" type="ssh/sftp">
+        <config>
+          <option name="projectRootOnTarget" value="/root/mit_test" />
+          <option name="serverName" value="root@164.52.88.2:22 password" />
+          <option name="useRsync" value="true" />
+        </config>
+        <ContributedStateBase type="GoLanguageRuntime">
+          <config>
+            <option name="goRoot" value="/root/go/bin/go" />
+            <option name="goVersion" value="go1.18 linux/amd64" />
+          </config>
+        </ContributedStateBase>
+      </target>
+    </targets>
+  </component>
+</project>
